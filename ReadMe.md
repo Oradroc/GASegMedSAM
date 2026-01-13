@@ -1,4 +1,4 @@
-# GA Autofluorescence (FAF) MedSAM Segmentation
+# GA FundusAutofluorescence (FAF) MedSAM Segmentation
 
 ## Repository contents
 This repository contains two primary scripts.
@@ -98,7 +98,11 @@ Model and hyperparameters:
   Total epochs (default: `100`)
 - `--transforms`  
   Apply random transformations to training images (default: `True`)
-
+  
+## Limitations
+- The model is intended for images that contain GA and has not been trained on no GA images. Performance on images without GA is not reliable.
+- The smallest lesion size supported for segmentation is 0.05 mm^2.
+  
 ### Example training command
 ```bash
 python GASegTrainV4.py \
@@ -130,7 +134,6 @@ python GASegInference.py \
   --batch_size 10 \
   --parallel True \
   --output_save_path ./inference_outputs
+'''
 
-## Limitations
-- The model is intended for images that contain GA and has not been trained on no GA images. Performance on images without GA is not reliable.
-- The smallest lesion size supported for segmentation is 0.05 mm^2.
+
