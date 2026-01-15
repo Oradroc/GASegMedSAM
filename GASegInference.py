@@ -146,7 +146,6 @@ def InferenceModel(args,dataloader, model, processor):#, dice_metric
     with torch.no_grad(): # ensure computation graph is created or gradients calculated
         dice = DiceMetric(include_background=False, reduction="none",ignore_empty=False)#mean
         dice_m = DiceMetric(include_background=False, reduction="mean",ignore_empty=False)
-        dice_all = DiceMetric(include_background=False, reduction="none",ignore_empty=False)
         binarize = Compose([Activations(sigmoid=True), AsDiscrete(threshold=0.5)])
         imgs_all = []
         for batch in tqdm(dataloader):
@@ -165,7 +164,7 @@ def InferenceModel(args,dataloader, model, processor):#, dice_metric
             #compute DICE
             dice(y_pred = masks_post_pred,y = ground_truth_masks)
             dice_m(y_pred = masks_post_pred,y = ground_truth_masks)
-            dice_all(y_pred = masks_post_pred,y = ground_truth_masks)
+            
 
             DICE = dice.aggregate()
             mean_DICE = dice_m.aggregate().item()
