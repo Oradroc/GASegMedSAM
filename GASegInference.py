@@ -30,6 +30,9 @@ from transformers import SamModel, SamProcessor
 import albumentations as A
 from monai.metrics import DiceMetric
 
+COMPARISONS_DIR = 'comparisons'
+PREDICTIONS_DIR = 'predictions'
+
 def entire_image_bounding_box(image,size):
     H, W = size
     bbox = [0, 0, W, H]#np.array([0, 0, W, H])
@@ -74,6 +77,7 @@ class MedSAMDataset(TorchDataset):
         #add ground truth seg
         inputs["ground_truth_mask"] = ground_truth_mask
         inputs["raw_image"] = image
+        inputs['filename'] = item['image']
 
         return inputs
         
@@ -144,10 +148,13 @@ def InferenceModel(args,dataloader, model, processor):#, dice_metric
         dice_m = DiceMetric(include_background=False, reduction="mean",ignore_empty=False)
         dice_all = DiceMetric(include_background=False, reduction="none",ignore_empty=False)
         binarize = Compose([Activations(sigmoid=True), AsDiscrete(threshold=0.5)])
+        imgs_all = []
         for batch in tqdm(dataloader):
             outputs = model(pixel_values = batch["pixel_values"].to(device), \
                             input_boxes = batch["input_boxes"].to(device), \
                             multimask_output = False)
+            img_paths = [os.path.splitext(os.path.split(filename)[1])[0] for filename in batch['filename']]
+            imgs_all += img_paths
             #get preds and process
             predicted_masks = outputs.pred_masks
             processed_masks = processor.post_process_masks(predicted_masks,batch["original_sizes"],batch["reshaped_input_sizes"],binarize = False)
@@ -187,9 +194,12 @@ def InferenceModel(args,dataloader, model, processor):#, dice_metric
                 for ax in axes: ax.axis("off")
                 
                 sav_img_base= args.output_save_path 
-                save_path = os.path.join(sav_img_base,f"Batch{batch_num}_idx{idx}_Comparison.png")
+                save_path = os.path.join(sav_img_base, COMPARISONS_DIR, f"{img_paths[idx]}_Comparison.png")
                 fig.savefig(save_path, dpi=300, bbox_inches='tight')
                 plt.close()
+                
+                # save mask on its own
+                np.save(os.path.join(sav_img_base, PREDICTIONS_DIR, f"{img_paths[idx]}_pred") , pred0)
             batch_num+=1
             dice.reset(); dice_m.reset()
         dice_all = np.array(dice_list).flatten()
@@ -198,6 +208,8 @@ def InferenceModel(args,dataloader, model, processor):#, dice_metric
         lo = float(res.confidence_interval.low)
         hi = float(res.confidence_interval.high)
         print(f"FINAL DICE: mean: {mean:.3f} 95%CI [{lo:.3f}:{hi:.3f}]")
+
+        pd.DataFrame([{'img': img, 'dice': dice} for img, dice in zip(imgs_all, dice_all)]).to_csv(os.path.join(sav_img_base, 'dice_scores.csv'), index=False)
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -238,6 +250,9 @@ def main():
     inf_df = pd.read_csv(args.inference_data_path)
     img_paths = inf_df[args.image_col]
     gt_paths = inf_df[args.mask_col]
+
+    os.makedirs(os.path.join(args.output_save_path, COMPARISONS_DIR), exist_ok=True)
+    os.makedirs(os.path.join(args.output_save_path, PREDICTIONS_DIR), exist_ok=True)
 
     print("Loading Data...")
     dataloader = LoadData(img_paths,gt_paths,proc,image_size=args.image_size,batch_size=args.batch_size)
