@@ -206,7 +206,7 @@ def InferenceModel(args,dataloader, model, processor):#, dice_metric
         mean = float(dice_all.mean())
         lo = float(res.confidence_interval.low)
         hi = float(res.confidence_interval.high)
-        print(f"FINAL DICE: mean: {mean:.3f} 95%CI [{lo:.3f}:{hi:.3f}]")
+        print(f"FINAL DICE mean: {mean:.3f} 95%CI [{lo:.3f}:{hi:.3f}]")
 
         pd.DataFrame([{'img': img, 'dice': dice} for img, dice in zip(imgs_all, dice_all)]).to_csv(os.path.join(sav_img_base, 'dice_scores.csv'), index=False)
 

@@ -366,8 +366,8 @@ def parse_args():
 
 def main():
     args = parse_args()
-    os.makedirs(args.model_save_path, exist_ok=False) #False to ensure prior model is not accidentally overwritten
-    os.makedirs(args.tensorboard_log_dir, exist_ok=False)
+    os.makedirs(args.model_save_path, exist_ok=True) #False to ensure prior model is not accidentally overwritten
+    os.makedirs(args.tensorboard_log_dir, exist_ok=True)
     print("Training dataset:", args.train_data_path)
     print("Validation dataset:", args.val_data_path)
     print("Image size:", args.image_size)
