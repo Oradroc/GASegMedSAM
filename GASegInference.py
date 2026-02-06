@@ -101,9 +101,9 @@ def _extract_state_dict(ckpt):
         elif "state_dict" in ckpt:
             state = ckpt["state_dict"]
         else:
-            print("BrokenStateDict")  # already a raw state_dict
+            print("BrokenStateDict")  
     else:
-        state = ckpt
+        state = ckpt # already a raw state_dict
 
     # strip common wrappers
     def strip_prefixes(name):

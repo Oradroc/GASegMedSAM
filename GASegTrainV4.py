@@ -37,28 +37,6 @@ from datasets import Dataset as HFDataset
 from transformers import SamModel, SamProcessor
 
 
-def get_bounding_box(ground_truth_mask):
-    '''
-    If empty mask return bounding box that is the size of the image
-    Otherwise return bounding box prompt from around the mask
-    '''
-    if ground_truth_mask.sum()==0: 
-        H, W = ground_truth_mask.shape
-        bbox = [0, 0, W, H]#np.array([0, 0, W, H])
-        return bbox
-    else:
-        y_indices, x_indices = np.where(ground_truth_mask > 0)
-        x_min, x_max = np.min(x_indices), np.max(x_indices)
-        y_min, y_max = np.min(y_indices), np.max(y_indices)
-        # add perturbation to bounding box coordinates
-        H, W = ground_truth_mask.shape
-        x_min = max(0, x_min - random.randint(0, 20))
-        x_max = min(W, x_max + random.randint(0, 20))
-        y_min = max(0, y_min - random.randint(0, 20))
-        y_max = min(H, y_max + random.randint(0, 20))
-        bbox = [x_min, y_min, x_max, y_max]#np.array([x_min, y_min, x_max, y_max])
-        return bbox
-
 def entire_image_bounding_box(image,size):
     H, W = size
     bbox = [0, 0, W, H]#np.array([0, 0, W, H])
@@ -139,13 +117,6 @@ class MedSAMDataset(TorchDataset):
         #add ground truth 
         inputs["ground_truth_mask"] = ground_truth_mask
         return inputs
-    
-def to_rgb(img):
-    if img is None:
-        return None
-    if img.ndim == 2: # grayscale to RGB
-        return cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
-    return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)  # BGR -> RGB
 
 #chatgpt written strip function
 def _strip_module_prefix(state_dict):
