@@ -29,7 +29,7 @@ from tqdm import tqdm
 from transformers import SamModel, SamProcessor
 import albumentations as A
 from monai.metrics import DiceMetric
-
+import ast
 COMPARISONS_DIR = 'comparisons'
 PREDICTIONS_DIR = 'predictions'
 
@@ -48,11 +48,11 @@ def to_rgb(img):
         return cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
     return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)  # BGR -> RGB
 class MedSAMDataset(TorchDataset):
-    def __init__(self, dataset, processor, image_size):
+    def __init__(self,args, dataset, processor, image_size):
         self.dataset = dataset
         self.processor = processor
         self.size = image_size
-
+        self.args=args
     def __len__(self):
         return len(self.dataset)
 
@@ -67,11 +67,21 @@ class MedSAMDataset(TorchDataset):
         mask_raw = cv2.resize(mask_raw, self.size, interpolation=cv2.INTER_NEAREST)
         image = np.array(img_raw, dtype=np.uint8)
         ground_truth_mask = np.array(mask_raw,dtype=np.uint8)
-        
+        ''' add arg for if point prompt or entire img bb'''
         #obtain bounding box for model prompt
-        prompt = entire_image_bounding_box(ground_truth_mask,self.size)#get size of mask which is sam size as image
-        #prepare for model
-        inputs = self.processor(image, input_boxes=[[prompt]], return_tensors = "pt")
+        if self.args.prompt_type == "image_bbox":
+            prompt = entire_image_bounding_box(ground_truth_mask,self.size)#get size of mask which is sam size as image
+            #prepare for model
+            inputs = self.processor(image, input_boxes=[[prompt]], return_tensors = "pt")
+        elif self.args.prompt_type == "point_prompt":
+            prompt = item["point_coords"]
+            #print(type(prompt))
+            #prompt = [ast.literal_eval(p) for p in prompt]
+            labels = item["point_labels"]
+            #print(labels)
+            #labels = ast.literal_eval(labels)
+            #print("promptlen",len(prompt),"labelslen",len(labels))
+            inputs = self.processor(image, input_points=[prompt], input_labels=[labels],return_tensors = "pt")
         #remove dimensions of the batch
         inputs = {k:v.squeeze(0) for k,v in inputs.items()}
         #add ground truth seg
@@ -81,17 +91,25 @@ class MedSAMDataset(TorchDataset):
 
         return inputs
         
-def LoadData(img_paths,gt_paths,processor,image_size=(1024,1024),batch_size=10):
+def LoadData(args,inf_df,processor,image_size=(1024,1024),batch_size=10):
     '''
     With imread unchanged reading in images with 4 channels as a BGR
     need 3 channel RGB for sam
     For masks need to use inter_nearest to ensure 0/1 does not get blended into gray
     '''
-    datadict = {"image": img_paths,"label": gt_paths}
+
+    ''' add arg for if point prompt or entire img bb'''
+    if args.prompt_type == "image_bbox":
+        datadict = {"image": inf_df[args.image_col],"label": inf_df[args.mask_col]}
+    elif args.prompt_type == "point_prompt":
+        print("here")
+        datadict = {"image": inf_df[args.image_col],"label": inf_df[args.mask_col],"point_coords": inf_df[args.point_prompts],"point_labels": inf_df[args.point_labels]}
+    else:
+        print("Enter prompt type (image_bbox or point_prompt)")
     data = HFDataset.from_dict(datadict)
-    dataset = MedSAMDataset(dataset=data, processor=processor, image_size=image_size)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, 
-            pin_memory=True)
+    dataset = MedSAMDataset(args=args,dataset=data, processor=processor, image_size=image_size)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, pin_memory=True,collate_fn=list)
+
     return dataloader
 
 def _extract_state_dict(ckpt):
@@ -149,9 +167,16 @@ def InferenceModel(args,dataloader, model, processor):#, dice_metric
         binarize = Compose([Activations(sigmoid=True), AsDiscrete(threshold=0.5)])
         imgs_all = []
         for batch in tqdm(dataloader):
-            outputs = model(pixel_values = batch["pixel_values"].to(device), \
-                            input_boxes = batch["input_boxes"].to(device), \
-                            multimask_output = False)
+            # make lists of each thing and put into the processor
+            pixel_values = batch["pixel_values"].to(device)
+            if args.prompt_type == "image_bbox":
+                input_boxes = batch["input_boxes"].to(device)
+                outputs = model(pixel_values=pixel_values,input_boxes=input_boxes,multimask_output=False)
+            elif args.prompt_type == "point_prompt":
+                input_points = batch["input_points"].to(device, dtype=torch.float32)
+                input_labels = batch["input_labels"].to(device, dtype=torch.int64)
+                outputs = model(pixel_values=pixel_values,input_points=input_points,input_labels=input_labels,multimask_output=False)
+
             img_paths = [os.path.splitext(os.path.split(filename)[1])[0] for filename in batch['filename']]
             imgs_all += img_paths
             #get preds and process
@@ -220,10 +245,19 @@ def parse_args():
                         help="Column name for image files in the train data")
     parser.add_argument("--mask_col", type=str, default="mask_path",
                         help="Column name for mask files in the train data")
+    #whole image bbox or point prompts with pos and neg labels
+    parser.add_argument("--prompt_type", type=str, default="image_bbox",
+                        help="image_bbox (whole img) default or point_prompt")
+    parser.add_argument("--point_prompts", type=str, default="point_prompts",
+                        help="Column name for list of list point prompt coords")
+    parser.add_argument("--point_labels", type=str, default="point_labels",
+                        help="Column name for point prompt pos and neg labels")
+    #base model and weights
     parser.add_argument("--base_model", type=str, default="wanglab/medsam-vit-base",
                         help="Medsam basemodel for training wanglab default. Also flaviagiammarino/medsam-vit-base")
     parser.add_argument("--model_ckpt", type=str, default="ckpt.pth",
                         help="Path to model weights")
+    #image specs and batch size
     parser.add_argument("--image_size", type=int, nargs=2, metavar=("W","H"), default=(1024,1024),
                         help="SAM Model resizes images to 1024 so load at 1024")
     parser.add_argument("--batch_size", type=int, default=10,
@@ -246,15 +280,19 @@ def main():
     proc = SamProcessor.from_pretrained(args.base_model)
     model = load_any_ckpt(model,args.model_ckpt)
     #import data
-    inf_df = pd.read_csv(args.inference_data_path)
-    img_paths = inf_df[args.image_col]
-    gt_paths = inf_df[args.mask_col]
+    if args.prompt_type == "image_bbox":
+        inf_df = pd.read_csv(args.inference_data_path)
+    elif args.prompt_type == "point_prompt":
+        inf_df = pd.read_parquet(args.inference_data_path)
+    
+    #img_paths = inf_df[args.image_col]
+    #gt_paths = inf_df[args.mask_col]
 
     os.makedirs(os.path.join(args.output_save_path, COMPARISONS_DIR), exist_ok=True)
     os.makedirs(os.path.join(args.output_save_path, PREDICTIONS_DIR), exist_ok=True)
 
     print("Loading Data...")
-    dataloader = LoadData(img_paths,gt_paths,proc,image_size=args.image_size,batch_size=args.batch_size)
+    dataloader = LoadData(args,inf_df,proc,image_size=args.image_size,batch_size=args.batch_size)
     print("Data Loaded")
     print("Running Inference...")
     InferenceModel(args,dataloader, model, proc)
