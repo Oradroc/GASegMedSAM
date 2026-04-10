@@ -1,40 +1,25 @@
 import argparse
 import os
-import random
-import re
-import sys
-from statistics import mean
 import cv2
 import matplotlib.pyplot as plt
-import monai
 import numpy as np
 import pandas as pd
 import torch
-import torch.multiprocessing as mp
-import torch.nn as nn
-from albumentations.pytorch import ToTensorV2
 from datasets import Dataset as HFDataset
 from monai.metrics import DiceMetric
 from monai.transforms import Activations, AsDiscrete, Compose
-from scipy import ndimage
 from scipy.stats import bootstrap
 from torch.nn import DataParallel
-from torch.nn.functional import interpolate, normalize, threshold
-from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from torch.utils.data import Dataset as TorchDataset
-from torch.utils.data import default_collate
-from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 from transformers import SamModel, SamProcessor
-import albumentations as A
-from monai.metrics import DiceMetric
-import ast
+
 COMPARISONS_DIR = 'comparisons'
 PREDICTIONS_DIR = 'predictions'
 
-def entire_image_bounding_box(image,size):
-    H, W = size
+def entire_image_bounding_box(size):
+    W, H = size
     bbox = [0, 0, W, H]#np.array([0, 0, W, H])
     return bbox
 def to_rgb(img):
@@ -44,15 +29,14 @@ def to_rgb(img):
     '''
     if img is None:
         return None
-    if img.ndim == 2: # grayscale to RGB
+    if img.ndim == 2: #grayscale to RGB
         return cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
-    return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)  # BGR -> RGB
+    return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)#BGR -> RGB
 class MedSAMDataset(TorchDataset):
-    def __init__(self,args, dataset, processor, image_size):
+    def __init__(self, dataset, processor, image_size):
         self.dataset = dataset
         self.processor = processor
         self.size = image_size
-        self.args=args
     def __len__(self):
         return len(self.dataset)
 
@@ -67,21 +51,10 @@ class MedSAMDataset(TorchDataset):
         mask_raw = cv2.resize(mask_raw, self.size, interpolation=cv2.INTER_NEAREST)
         image = np.array(img_raw, dtype=np.uint8)
         ground_truth_mask = np.array(mask_raw,dtype=np.uint8)
-        ''' add arg for if point prompt or entire img bb'''
-        #obtain bounding box for model prompt
-        if self.args.prompt_type == "image_bbox":
-            prompt = entire_image_bounding_box(ground_truth_mask,self.size)#get size of mask which is sam size as image
-            #prepare for model
-            inputs = self.processor(image, input_boxes=[[prompt]], return_tensors = "pt")
-        elif self.args.prompt_type == "point_prompt":
-            prompt = item["point_coords"]
-            #print(type(prompt))
-            #prompt = [ast.literal_eval(p) for p in prompt]
-            labels = item["point_labels"]
-            #print(labels)
-            #labels = ast.literal_eval(labels)
-            #print("promptlen",len(prompt),"labelslen",len(labels))
-            inputs = self.processor(image, input_points=[prompt], input_labels=[labels],return_tensors = "pt")
+        
+        prompt = entire_image_bounding_box(self.size)
+        inputs = self.processor(image, input_boxes=[[prompt]], return_tensors="pt")
+
         #remove dimensions of the batch
         inputs = {k:v.squeeze(0) for k,v in inputs.items()}
         #add ground truth seg
@@ -90,26 +63,17 @@ class MedSAMDataset(TorchDataset):
         inputs['filename'] = item['image']
 
         return inputs
-        
-def LoadData(args,inf_df,processor,image_size=(1024,1024),batch_size=10):
+
+def LoadData(args, inf_df, processor, image_size=(1024, 1024), batch_size=10):
     '''
     With imread unchanged reading in images with 4 channels as a BGR
     need 3 channel RGB for sam
     For masks need to use inter_nearest to ensure 0/1 does not get blended into gray
     '''
-
-    ''' add arg for if point prompt or entire img bb'''
-    if args.prompt_type == "image_bbox":
-        datadict = {"image": inf_df[args.image_col],"label": inf_df[args.mask_col]}
-    elif args.prompt_type == "point_prompt":
-        print("here")
-        datadict = {"image": inf_df[args.image_col],"label": inf_df[args.mask_col],"point_coords": inf_df[args.point_prompts],"point_labels": inf_df[args.point_labels]}
-    else:
-        print("Enter prompt type (image_bbox or point_prompt)")
+    datadict = {"image": inf_df[args.image_col],"label": inf_df[args.mask_col]}
     data = HFDataset.from_dict(datadict)
-    dataset = MedSAMDataset(args=args,dataset=data, processor=processor, image_size=image_size)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, pin_memory=True,collate_fn=list)
-
+    dataset = MedSAMDataset(dataset=data, processor=processor, image_size=image_size)
+    dataloader = DataLoader(dataset,batch_size=batch_size,shuffle=False,pin_memory=True)
     return dataloader
 
 def _extract_state_dict(ckpt):
@@ -121,9 +85,9 @@ def _extract_state_dict(ckpt):
         else:
             print("BrokenStateDict")  
     else:
-        state = ckpt # already a raw state_dict
+        state = ckpt #already a raw state_dict
 
-    # strip common wrappers
+    #strip common wrappers
     def strip_prefixes(name):
         for p in ("module.", "model."):
             if name.startswith(p):
@@ -137,9 +101,9 @@ def load_any_ckpt(model, path, device="cpu", strict=False):
     Needed because model weight format is stored different if DataParallel is used v.s. no Parallel.
     '''
     try:
-        ckpt = torch.load(path, map_location=device)  # PyTorch 2.6 defaults to weights_only=True
+        ckpt = torch.load(path, map_location=device)  
     except Exception:
-        ckpt = torch.load(path, map_location=device, weights_only=False)  # trusted only
+        ckpt = torch.load(path, map_location=device, weights_only=False) #trusted only
 
     state = _extract_state_dict(ckpt)
     missing, unexpected = model.load_state_dict(state, strict=strict)
@@ -154,28 +118,23 @@ def InferenceModel(args,dataloader, model, processor):#, dice_metric
  
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print("Available Device: ", device)
-    if args.parallel:
-        model = DataParallel(model, device_ids=[0,1])
-    model.to(device) 
+    if args.parallel and torch.cuda.is_available() and torch.cuda.device_count()>1:
+        model = DataParallel(model)
+    model.to(device)
     #create Validation loop
     model.eval()
     dice_list=[]
     batch_num=0
-    with torch.no_grad(): # ensure computation graph is created or gradients calculated
+    with torch.no_grad(): #do not calc grads
         dice = DiceMetric(include_background=False, reduction="none",ignore_empty=False)#mean
         dice_m = DiceMetric(include_background=False, reduction="mean",ignore_empty=False)
         binarize = Compose([Activations(sigmoid=True), AsDiscrete(threshold=0.5)])
         imgs_all = []
         for batch in tqdm(dataloader):
-            # make lists of each thing and put into the processor
+            #get inputs
             pixel_values = batch["pixel_values"].to(device)
-            if args.prompt_type == "image_bbox":
-                input_boxes = batch["input_boxes"].to(device)
-                outputs = model(pixel_values=pixel_values,input_boxes=input_boxes,multimask_output=False)
-            elif args.prompt_type == "point_prompt":
-                input_points = batch["input_points"].to(device, dtype=torch.float32)
-                input_labels = batch["input_labels"].to(device, dtype=torch.int64)
-                outputs = model(pixel_values=pixel_values,input_points=input_points,input_labels=input_labels,multimask_output=False)
+            input_boxes = batch["input_boxes"].to(device)
+            outputs = model(pixel_values=pixel_values,input_boxes=input_boxes,multimask_output=False)
 
             img_paths = [os.path.splitext(os.path.split(filename)[1])[0] for filename in batch['filename']]
             imgs_all += img_paths
@@ -207,7 +166,7 @@ def InferenceModel(args,dataloader, model, processor):#, dice_metric
                     gt = gt.squeeze(0)
                 gt = gt.numpy() if hasattr(gt, "numpy") else gt
 
-                # Plot
+                #Plot
                 fig, axes = plt.subplots(1, 3, figsize=(12, 3), constrained_layout=True)
                 axes[0].imshow(img)
                 axes[0].set_title(f"Input (batch {batch_num}, idx {idx})")
@@ -222,7 +181,7 @@ def InferenceModel(args,dataloader, model, processor):#, dice_metric
                 fig.savefig(save_path, dpi=300, bbox_inches='tight')
                 plt.close()
                 
-                # save mask on its own
+                #save mask on its own
                 np.save(os.path.join(sav_img_base, PREDICTIONS_DIR, f"{img_paths[idx]}_pred") , pred0)
             batch_num+=1
             dice.reset(); dice_m.reset()
@@ -245,13 +204,6 @@ def parse_args():
                         help="Column name for image files in the train data")
     parser.add_argument("--mask_col", type=str, default="mask_path",
                         help="Column name for mask files in the train data")
-    #whole image bbox or point prompts with pos and neg labels
-    parser.add_argument("--prompt_type", type=str, default="image_bbox",
-                        help="image_bbox (whole img) default or point_prompt")
-    parser.add_argument("--point_prompts", type=str, default="point_prompts",
-                        help="Column name for list of list point prompt coords")
-    parser.add_argument("--point_labels", type=str, default="point_labels",
-                        help="Column name for point prompt pos and neg labels")
     #base model and weights
     parser.add_argument("--base_model", type=str, default="wanglab/medsam-vit-base",
                         help="Medsam basemodel for training wanglab default. Also flaviagiammarino/medsam-vit-base")
@@ -262,8 +214,11 @@ def parse_args():
                         help="SAM Model resizes images to 1024 so load at 1024")
     parser.add_argument("--batch_size", type=int, default=10,
                         help="Batch size (10max for l40)")
-    parser.add_argument("--parallel", type=bool, default=True,
-                        help="Default True 2 GPU DataParallel, False 1 GPU.")
+    parser.set_defaults(parallel=True)
+    parser.add_argument("--parallel", dest="parallel", action="store_true",
+                        help="Use DataParallel when multiple GPUs are available")
+    parser.add_argument("--no_parallel", dest="parallel", action="store_false",
+                        help="Disable DataParallel and use a single GPU")
     parser.add_argument("--output_save_path", type=str, default="./checkpoints",
                         help="Directory to save inference")
     return parser.parse_args()
@@ -280,13 +235,7 @@ def main():
     proc = SamProcessor.from_pretrained(args.base_model)
     model = load_any_ckpt(model,args.model_ckpt)
     #import data
-    if args.prompt_type == "image_bbox":
-        inf_df = pd.read_csv(args.inference_data_path)
-    elif args.prompt_type == "point_prompt":
-        inf_df = pd.read_parquet(args.inference_data_path)
-    
-    #img_paths = inf_df[args.image_col]
-    #gt_paths = inf_df[args.mask_col]
+    inf_df = pd.read_csv(args.inference_data_path)
 
     os.makedirs(os.path.join(args.output_save_path, COMPARISONS_DIR), exist_ok=True)
     os.makedirs(os.path.join(args.output_save_path, PREDICTIONS_DIR), exist_ok=True)
